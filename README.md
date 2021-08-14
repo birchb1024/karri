@@ -12,7 +12,21 @@ This tool is inspired by Liquibase which is a popular tool for managing schema c
 
 # Introduction
 
-TODO
+## Rungs
+
+* are expected to be built in an atomic way, ie either the rung 'up' is fully complete or it fails. Same for 'down'.
+* if a rung up fails, the execution of the playbook stops
+* rungs have
+** up - commands to perform to update a system or components or perform some jobs
+** down - commands to reverse the effect of the 'up' 
+*** the down cannot be run beofre the up - Karri ensures this via information in the state file
+*** the sequence 'up' 'down' must be idempotent - that is the up must be able to be re-run after the down (the external system state may not be the same though). The 'up'-'down-'up' sequence shold be used for testing a playbook to ensure the down works, and that they are idempotent together. 
+
+[TODO]
+
+Notes:
+
+Unlike tools like Ansible or Terraform, there is no library of providers/modules which wrap infrastructure or operating system resources. These may emerge and be wrapped in Karri macros for syntactic ease. However the developer can use their existing knowledge of tool sets such as CLIs, APIs within the Karri framework.
 
 # Command-line
 
@@ -22,7 +36,13 @@ TODO
 
 # Playbook File Syntax
 
-The playbooks are written in YAML (and possibly JSON). 
+The playbooks are written in YAML (and possibly JSON). The `goyamp` system (or variant of) will be used and provides:
+
+* variables
+* include of source files
+* reusable macros
+* loading of data - possibly configuration
+* Lua embedding
 
 ## Example playbook
 
@@ -40,154 +60,74 @@ The playbooks are written in YAML (and possibly JSON).
   rungs:
   - name: grub
     description: Configure Grub boot
-    # refer to https://breadmaker.github.io/grub-tune-tester/ , https://gist.github.com/ArtBIT/cfb030c0791b42330381acce33f82ca0
     tags: grub
-    block:  
-    - name: config
-      description: Edit Grub Config
-      up:
-        sudo: |
-          set -euo pipefail
-          sed -i_bu -e '/GRUB_GFXMODE=/c\GRUB_GFXMODE=1024x768' \
-                  -e '/GRUB_INIT_TUNE=/c\GRUB_INIT_TUNE="410 668 1 668 1 0 1 668 1 0 1 522 1 668 1 0 1 784 2 0 2 392 2"' \
-                  -e '/GRUB_TIMEOUT=/c\GRUB_TIMEOUT=10' /etc/default/grub
-      down: 
-        sudo: |
+    up:
+      sudo: |
+        set -euo pipefail
+        sed -i_bu -e '/GRUB_GFXMODE=/c\GRUB_GFXMODE=1024x768' \
+                -e '/GRUB_INIT_TUNE=/c\GRUB_INIT_TUNE="410 668 1 668 1 0 1 668 1 0 1 522 1 668 1 0 1 784 2 0 2 392 2"' \
+                -e '/GRUB_TIMEOUT=/c\GRUB_TIMEOUT=10' /etc/default/grub
+        if [ diff /etc/default/grub /etc/default/grub_bu ] ; then
+          update-grub
+        fi
+      changed_if_not:
+        shell: diff /etc/default/grub /etc/default/grub_bu
+    down: 
+      sudo: |
+        if [ diff /etc/default/grub /etc/default/grub_bu ] ; then
           cp /etc/default/grub_bu /etc/default/grub
-      
-    - name: update
-      description: Update grub boot
-      when: grub.config.changed
-      sudo: update-grub
-
-      
-    - name: update
-      description: Update grub boot
-      when: grub.config.changed
-      sudo: update-grub
-
-  - name: Download Hosts file
-    get_url:
-      url: http://192.168.0.130/etc/hosts # TODO externalise 192.168.0.130 is promus
-      force: yes
-      dest: /etc/hosts
-      owner: root
-      group: root
-      mode: u=rw,g=r,o=r
-
-  - name: Add '{{ ansible_facts['nodename'] }}' to hosts
-    lineinfile:
-      path: /etc/hosts
-      regexp: '{{ item.regex }}'
-      line: '{{ item.line }}' 
-    with_items:
-      - regex: '127.0.0.1' 
-        line: 127.0.0.1 localhost {{ ansible_facts['nodename'] }}
-      - regex: '127.0.1.1'
-        line: 127.0.1.1 {{ ansible_facts['nodename'] }}
-
-  - name: Remove unwanted packages
-    apt:
-      state: absent
-      autoremove: true
-      name:
-      - hv3
-      - orca # conflicts with orca the sequencer
-
-  - name: System admin tools
-    apt:
-      state: latest
-      update_cache: true
-      name:
-      - apt-file
-      - aptitude
-      - dnsutils 			# dig, nslookup
-      - edac-utils			# edac-util
-      - gnome-disk-utility 	# gnome-disks
-      - gparted
-      - gpg
-      - htop
-      - hwinfo
-      - ncdu
-      - rsync
-      - sudo
-      - tree
-      
-  - name: Static IP Address # https://michlstechblog.info/blog/linux-set-a-static-fixed-ip-with-network-manager-cli/
-    ansible.builtin.shell: |
-      set -euo pipefail
-      nmcli
-      (cd /etc/NetworkManager/system-connections ; awk '{print FILENAME":",$0}' * )
-      interface="$(nmcli -t con show | awk -F : '/ethernet/{print $NF}')"
-      conn="$(nmcli -t con show | awk -F : '/ethernet/{print $1}' )"
-      nmcli con down "$conn"
-      nmcli con mod "$conn" \
-        ipv4.addresses  {{theipaddress}} \
-        ipv4.gateway "{{gateway}}" \
-        ipv4.dns "{{dns_servers}}" \
-        ipv4.method "manual"
-      nmcli con up "$conn"
-    args:
-      executable: /bin/bash
-  
-
-  - name: check output
-    ansible.builtin.shell: |
-      nmcli
-  
-  - name: Host-specific firmware #TODO from inventory
-    apt:
-      state: latest
-      update_cache: true
-      name:
-      - firmware-amd-graphics
-
-  - name: Adding '{{ theuser }}' to sudo group
-    user:
-      name: '{{ theuser }}'
-      groups: sudo
-      append: yes
-
-  - name: Allow '{{ theuser }}' to have passwordless sudo
-    lineinfile:
-      dest: /etc/sudoers
-      state: present
-      regexp: '^{{theuser}}'
-      line: '{{theuser}} ALL=(ALL) NOPASSWD: ALL'
-      validate: visudo -cf %s
-
-  - name: Security
-    include_tasks: security.yaml
-    tags: security
-
-  - name: Docker
-    include_tasks: docker.yaml
-    tags: docker
-
-  - name: qemu
-    include_tasks: qemu.yaml
-    tags: qemu
-
-  - name: Internet Tools
-    include_tasks: internet.yaml
-    tags: internet
-
-  - name: Development Tools
-    include_tasks: development.yaml
-    tags: development
-
-  - name: Genyris
-    include_tasks: genyris.yaml
-    tags: genyris
-
-  - name: Goland
-    include_tasks: goland.yaml
-    tags: goland
-
-  - name: Games
-    include_tasks: games.yaml
-    tags: games
+          update-grub
+        fi
+      changed_if_not:
+        shell: diff /etc/default/grub /etc/default/grub_bu
 ```
+
+# Rung Transaction Control
+
+In addition to the default behaviour of executing the `up` tasks of rungs, there is also
+
+### When the source code changes
+
+When the code in the `up` clause is read, Karri computes a checksum of the YAML string. This is saved in the state file. If later Karri is run it can detect if the source code been has changed by the authors. The following boolean flags can be set in the tasks:
+* run_on_change: (default = true)
+* run_always:  (default = false)
+* error_on_change: (default = false) 
+
+### Rung Transaction Results
+
+The outcomes of a rung can be:
+
+* changed (boolean) if the rung up succeeded
+* failed (boolean)
+
+### The outcome can be explicity set by the rung
+
+* changed_if: 
+* changed_if_not:
+
+### Conditions
+
+The `when` or `unless` clause specifies a logical condition in Karri which determines if the rung is to be executed. 
+The result of a previous step can be used in a condition, eg
+```
+  when: grub.changed
+```
+or if a recovery rung is needed:
+```
+  when: grub.failed
+```
+
+
+# State Files
+
+The status of a playbook is stored by default in a JSON file in the local file system. [Or maybe a SQLite database]. The following is stored for every rung in every execution
+
+* Rung name
+* Rung 'up' tasks source code checksums
+* Start & End Date and Time
+* Rung outcome changed/success
+
+This information is used by Karri to skip rungs which have already been done, or in the case of rollback to decide which rungs need to be undone.
 
 
 # The Name
